@@ -1,4 +1,5 @@
 import { ALL_FIELDS, SECTIONS, MODERNIZATIONS, STANDARDS, PHOTO_SLOTS } from './schema.mjs';
+import { pointAssessment, pointRecommendation } from './modernization.mjs';
 export const uid = () => globalThis.crypto.randomUUID();
 export const empty = value => value === '' || value === undefined || value === null;
 export const number = value => empty(value) || !String(value).trim() ? null : Number.isFinite(Number(String(value).replace(',', '.'))) ? Number(String(value).replace(',', '.')) : null;
@@ -9,7 +10,7 @@ export const safeName = value => String(value || 'Ortstermin').normalize('NFC').
 export function newRecord(orderNumber) {
   if (!String(orderNumber).trim()) throw new Error('Bitte eine Auftragsnummer eingeben.');
   const now = new Date().toISOString();
-  return { id: uid(), number: String(orderNumber).trim(), fields: {}, rooms: [], damages: [], openItems: [], photos: [], attachments: [], modernizations: Object.fromEntries(MODERNIZATIONS.map(m => [m.id, { extent: '', year: '', detail: '', source: '', points: '' }])), standards: Object.fromEntries(STANDARDS.map(s => [s.id, { level: '', reason: '' }])), reviewed: {}, status: 'in_bearbeitung', archived: false, createdAt: now, updatedAt: now, revision: 0 };
+  return { id: uid(), number: String(orderNumber).trim(), fields: {}, rooms: [], damages: [], openItems: [], photos: [], attachments: [], modernizations: Object.fromEntries(MODERNIZATIONS.map(m => [m.id, { extent: '', year: '', detail: '', source: '', points: '', pointReason: '' }])), standards: Object.fromEntries(STANDARDS.map(s => [s.id, { level: '', reason: '' }])), reviewed: {}, status: 'in_bearbeitung', archived: false, createdAt: now, updatedAt: now, revision: 0 };
 }
 export function energyClass(value) {
   const n = number(value); if (n === null || n < 0) return null;
@@ -46,9 +47,10 @@ export function issues(record) {
   for (const m of MODERNIZATIONS) {
     const v = record.modernizations[m.id] || {}; const p = number(v.points);
     if (!empty(v.points) && (p === null || p < 0 || p > m.max)) add('modernisierung', `${m.title}: Punkte müssen zwischen 0 und ${m.max} liegen.`);
-    if (['teilweise', 'vollständig'].includes(v.extent) && !v.year.trim()) add('modernisierung', `${m.title}: Zeitpunkt noch offen.`);
+    if (['teilweise', 'vollständig'].includes(v.extent) && !String(v.year || '').trim()) add('modernisierung', `${m.title}: Zeitpunkt noch offen.`);
     if (/^\d{4}$/.test(v.year) && year && Number(v.year) > year) add('modernisierung', `${m.title}: Modernisierung liegt nach dem Stichtag.`);
-    if (v.extent === 'keine' && p > 0 && !v.detail.trim()) add('modernisierung', `${m.title}: Punkte trotz fehlender Modernisierung bitte begründen.`);
+    const assessment = pointAssessment(record, m.id);
+    if (assessment.missingReason) add('modernisierung', `${m.title}: ${assessment.deviates ? 'Abweichenden Punkteansatz' : 'Sachverständigen Punkteansatz'} bitte begründen.`);
   }
   if (f.damageStatus === 'Feststellungen dokumentiert' && !record.damages.some(d => d.finding.trim())) add('technik', 'Die festgestellten Schäden sind noch nicht beschrieben.');
   const slots = record.photos.map(p => p.slot).filter(s => s !== 'Zusatzfoto');
@@ -87,9 +89,9 @@ export function templateFields(record) {
   if (c.weighted !== null) put('ASS_Summe', fmt(c.weighted, 3));
   for (const [key, val] of Object.entries({ Zahl_Modernisierungspunkte: c.totalPoints, Stichjahr: c.year, Zahl_Gebäudealter: c.age, Zahl_RND: c.baseRnd, Prozentzahl_relatives_Gebäudealter: c.relativeAge })) if (val !== null) put(key, fmt(val));
   const explanationKeys = ['Erläuterung_Mod_Dach_wenn_vorhanden', 'Erläuterung_Mod_Fenster_wenn_vorhanden', 'Eräuterung_Mod_Leitungssysteme_wenn_vorhanden', 'Erläuterung_Mod_Heizungsanlage_wenn_vorhanden', 'Eräuterungen_Mod_Wärmedämmung_Außenwände_wenn_vorhanden', 'Erläuterungen_Mod_Bäder_wenn_vorhanden', 'Erläuterungen_Mod_Innenausbau_Decken_Fußböden_Treppen_wenn_vorhanden', 'Erläuterungen_Mod_Grundrissgestaltung'];
-  MODERNIZATIONS.forEach((m, i) => { const v = record.modernizations[m.id]; if (v && (v.extent || v.year || v.detail)) put(explanationKeys[i], [m.title + ':', v.extent && `Umfang: ${v.extent}.`, v.year && `Zeitpunkt: ${v.year}.`, v.detail, v.source && `Quelle: ${v.source}.`, !empty(v.points) && `Ansatz: ${v.points} Punkte.`].filter(Boolean).join(' ')); });
+  MODERNIZATIONS.forEach((m, i) => { const v = record.modernizations[m.id]; if (v && (v.extent || v.year || v.detail || !empty(v.points))) { const rec = pointRecommendation(record, m.id); put(explanationKeys[i], [m.title + ':', v.extent && `Umfang: ${v.extent}.`, v.year && `Zeitpunkt: ${v.year}.`, v.detail, v.source && `Quelle: ${v.source}.`, `Tabellenhinweis: ${rec.label}. ${rec.basis} Quelle: ${rec.source}.`, !empty(v.points) && `Sachverständiger Ansatz: ${v.points} Punkte.`, v.pointReason && `Begründung zum Punkteansatz: ${v.pointReason}`].filter(Boolean).join(' ')); } });
   for (let n = 1; n <= 4; n++) put(`Foto${n}_beschriften`, record.photos.find(p => p.slot === `Foto ${n}`)?.caption);
-  return { format: 'knoll-vorlagenfelder', version: 1, policy: { replaceOnlyOriginallyYellow: true, preserveAllOtherTextAndFormatting: true, blockedOccurrences: [{ field: 'Anbauweise', location: 'Gebäudebeschreibung auf Seite 8' }, { field: 'Baujahr', location: 'Gebäudebeschreibung auf Seite 8' }], note: 'Gleiche Feldnamen dürfen nur an ursprünglich gelben Fundstellen ersetzt werden. Kein globales Suchen und Ersetzen.' }, fields: result, modernizationRows: MODERNIZATIONS.map(m => ({ element: m.title, ...record.modernizations[m.id] })), photoAssignments: record.photos.map(p => ({ slot: p.slot, assetId: p.id, caption: p.caption })) };
+  return { format: 'knoll-vorlagenfelder', version: 1, policy: { replaceOnlyOriginallyYellow: true, preserveAllOtherTextAndFormatting: true, blockedOccurrences: [{ field: 'Anbauweise', location: 'Gebäudebeschreibung auf Seite 8' }, { field: 'Baujahr', location: 'Gebäudebeschreibung auf Seite 8' }], note: 'Gleiche Feldnamen dürfen nur an ursprünglich gelben Fundstellen ersetzt werden. Kein globales Suchen und Ersetzen.' }, fields: result, modernizationRows: MODERNIZATIONS.map(m => ({ element: m.title, ...record.modernizations[m.id], recommendation: pointRecommendation(record, m.id) })), photoAssignments: record.photos.map(p => ({ slot: p.slot, assetId: p.id, caption: p.caption })) };
 }
 const string = (x, max = 10000) => { const s = typeof x === 'string' ? x : typeof x === 'number' && Number.isFinite(x) ? String(x) : ''; if (s.length > max) throw new Error('Ein Importfeld überschreitet die erlaubte Länge. Es wurden keine Daten übernommen.'); return s; };
 export function validateImport(data) {
@@ -97,7 +99,7 @@ export function validateImport(data) {
   const raw = data.record, record = newRecord(string(raw.number, 100));
   for (const key of ['rooms', 'damages', 'openItems', 'photos', 'attachments']) if (Array.isArray(raw[key]) && raw[key].length > (['photos','attachments'].includes(key) ? 300 : 500)) throw new Error('Der Import enthält zu viele Einträge. Es wurden keine Daten übernommen.');
   for (const f of ALL_FIELDS) record.fields[f.id] = string(raw.fields?.[f.id]);
-  for (const m of MODERNIZATIONS) for (const key of ['extent', 'year', 'detail', 'source', 'points']) record.modernizations[m.id][key] = string(raw.modernizations?.[m.id]?.[key]);
+  for (const m of MODERNIZATIONS) for (const key of ['extent', 'year', 'detail', 'source', 'points', 'pointReason']) record.modernizations[m.id][key] = string(raw.modernizations?.[m.id]?.[key]);
   for (const s of STANDARDS) for (const key of ['level', 'reason']) record.standards[s.id][key] = string(raw.standards?.[s.id]?.[key]);
   for (const [key, props] of Object.entries({ rooms: ['name', 'floor', 'condition'], damages: ['location', 'finding', 'source'], openItems: ['title', 'person', 'due'] })) {
     record[key] = (Array.isArray(raw[key]) ? raw[key] : []).slice(0, 500).map(row => ({ id: uid(), ...Object.fromEntries(props.map(k => [k, string(row?.[k])])), ...(key === 'openItems' ? { done: row?.done === true } : {}) }));

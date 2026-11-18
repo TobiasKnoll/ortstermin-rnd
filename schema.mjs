@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 const field = (id, label, type = 'text', extra = {}) => ({ id, label, type, ...extra });
 const options = (...values) => values;
 export const SECTIONS = [
